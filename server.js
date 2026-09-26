@@ -1,71 +1,12 @@
-const express = require("express");
-const cors = require("cors");
-
-const app = express();
-
-app.use(cors());
-app.use(express.json());
-
-const users = new Map();
-
-const TIMEOUT = 15000;
-
-// Device tells server it is still online
-app.post("/heartbeat", (req, res) => {
-  const { id } = req.body;
-
-  if (!id) {
-    return res.status(400).json({ error: "Missing device ID" });
-  }
-
-  users.set(id, Date.now());
-
-  res.json({
-    online: users.size
-  });
-});
-
-// Get current online count
-app.get("/online", (req, res) => {
-  cleanup();
-
-  res.json({
-    online: users.size
-  });
-});
-
-// Remove device when it leaves
-app.post("/leave", (req, res) => {
-  const { id } = req.body;
-
-  if (id) {
-    users.delete(id);
-  }
-
-  res.json({
-    online: users.size
-  });
-});
-
-function cleanup() {
-  const now = Date.now();
-
-  for (const [id, lastSeen] of users) {
-    if (now - lastSeen > TIMEOUT) {
-      users.delete(id);
-    }
-  }
-}
-
-// Clean inactive devices regularly
-setInterval(cleanup, 5000);
-
-app.get("/", (req, res) => {
-  res.send("Online counter server is running!");
-});
-
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+const express=require("express"),cors=require("cors");const{Pool}=require("pg");const app=express();app.use(cors());app.use(express.json({limit:"20kb"}));
+const users=new Map(),TIMEOUT=15000;function cleanup(){const n=Date.now();for(const[id,t]of users)if(n-t>TIMEOUT)users.delete(id)}
+app.post("/heartbeat",(q,s)=>{if(!q.body.id)return s.status(400).json({error:"Missing device ID"});users.set(q.body.id,Date.now());s.json({online:users.size})});
+app.get("/online",(q,s)=>{cleanup();s.json({online:users.size})});app.post("/leave",(q,s)=>{if(q.body.id)users.delete(q.body.id);s.json({online:users.size})});setInterval(cleanup,5000);
+const pool=process.env.DATABASE_URL?new Pool({connectionString:process.env.DATABASE_URL,ssl:{rejectUnauthorized:false}}):null;
+async function init(){if(!pool)return console.log("DATABASE_URL not set");await pool.query("CREATE TABLE IF NOT EXISTS render_posts(id BIGSERIAL PRIMARY KEY,parent_id BIGINT REFERENCES render_posts(id) ON DELETE CASCADE,name VARCHAR(40) NOT NULL,body VARCHAR(300) NOT NULL,owner_token TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");await pool.query("CREATE TABLE IF NOT EXISTS render_likes(post_id BIGINT REFERENCES render_posts(id) ON DELETE CASCADE,device_id TEXT NOT NULL,PRIMARY KEY(post_id,device_id))");console.log("Comments DB ready")}init().catch(console.error);
+const clean=(v,n)=>String(v||"").trim().slice(0,n);function ready(s){if(!pool){s.status(503).json({error:"Comments database not connected"});return false}return true}
+app.get("/comments",async(q,s)=>{if(!ready(s))return;try{const d=clean(q.query.device,120),r=await pool.query("SELECT p.id,p.parent_id,p.name,p.body,p.created_at,COUNT(l.device_id)::int likes,COALESCE(BOOL_OR(l.device_id=$1),false) liked FROM render_posts p LEFT JOIN render_likes l ON l.post_id=p.id GROUP BY p.id ORDER BY p.created_at ASC",[d]);s.json(r.rows)}catch(e){console.error(e);s.status(500).json({error:"Could not load comments"})}});
+app.post("/comments",async(q,s)=>{if(!ready(s))return;const name=clean(q.body.name,40),body=clean(q.body.body,300),owner=clean(q.body.ownerToken,160),parent=q.body.parentId?Number(q.body.parentId):null;if(!name||!body||!owner)return s.status(400).json({error:"Missing fields"});try{if(parent){const x=await pool.query("SELECT id FROM render_posts WHERE id=$1",[parent]);if(!x.rowCount)return s.status(404).json({error:"Parent not found"})}const r=await pool.query("INSERT INTO render_posts(parent_id,name,body,owner_token) VALUES($1,$2,$3,$4) RETURNING id",[parent,name,body,owner]);s.status(201).json(r.rows[0])}catch(e){console.error(e);s.status(500).json({error:"Could not post"})}});
+app.post("/comments/:id/like",async(q,s)=>{if(!ready(s))return;const id=Number(q.params.id),d=clean(q.body.deviceId,120);if(!d)return s.status(400).json({error:"Missing device ID"});try{const r=await pool.query("DELETE FROM render_likes WHERE post_id=$1 AND device_id=$2 RETURNING post_id",[id,d]);if(r.rowCount)return s.json({liked:false});await pool.query("INSERT INTO render_likes(post_id,device_id) VALUES($1,$2)",[id,d]);s.json({liked:true})}catch(e){console.error(e);s.status(500).json({error:"Could not change like"})}});
+app.delete("/comments/:id",async(q,s)=>{if(!ready(s))return;const id=Number(q.params.id),o=clean(q.body.ownerToken,160);try{const r=await pool.query("DELETE FROM render_posts WHERE id=$1 AND owner_token=$2 RETURNING id",[id,o]);if(!r.rowCount)return s.status(403).json({error:"You can only delete your own post"});s.json({deleted:true})}catch(e){console.error(e);s.status(500).json({error:"Could not delete"})}});
+app.get("/",(q,s)=>s.send("Online counter + Render comments server is running!"));app.listen(process.env.PORT||3000,()=>console.log("Server running"));
